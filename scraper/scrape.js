@@ -6,6 +6,10 @@ import StealthPlugin from "puppeteer-extra-plugin-stealth"; // Import plugin ste
 
 puppeteer.use(StealthPlugin()); // Aktifkan plugin stealth
 
+// Konfigurasi Browser
+const USE_HEADLESS = false; // true = browser tidak terlihat (production), false = browser terlihat (debugging)
+const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'; // Path Chrome di macOS
+
 // URL utama website target dan batas tanggal pencarian
 const BASE_URL = "https://kliping.jogjakota.go.id/frontend"; 
 const DATE_FROM = "2024-01-01"; 
@@ -14,9 +18,10 @@ const STEP = 9; // Jumlah data per halaman
 const MAX_PAGES = 1; // Jumlah maksimum halaman yang akan discan
 
 // Konfigurasi Retry System
-const MAX_RETRIES = 3; // Maksimal retry per operasi
-const RETRY_DELAY = 5000; // Delay 5 detik sebelum retry
-const PAGE_TIMEOUT = 60000; // Timeout 60 detik untuk load halaman
+const MAX_RETRIES = 5; // Maksimal retry per operasi (ditingkatkan untuk koneksi tidak stabil)
+const RETRY_DELAY = 3000; // Delay 3 detik sebelum retry
+const PAGE_TIMEOUT = 90000; // Timeout 90 detik untuk load halaman (ditingkatkan)
+const NAVIGATION_TIMEOUT = 90000; // Timeout khusus untuk navigasi
 
 const OUT = path.resolve("output");
 const IMG_DIR = path.join(OUT, "images");
@@ -39,12 +44,18 @@ async function retryOperation(operation, operationName, maxRetries = MAX_RETRIES
         error.message.includes('Navigation') ||
         error.message.includes('timeout') ||
         error.message.includes('disconnected') ||
-        error.message.includes('Protocol error');
+        error.message.includes('Protocol error') ||
+        error.message.includes('socket hang up') ||
+        error.message.includes('ECONNRESET') ||
+        error.message.includes('ETIMEDOUT') ||
+        error.message.includes('ENOTFOUND') ||
+        error.message.includes('Target closed');
       
       if (isNetworkError && attempt < maxRetries) {
-        console.log(`⚠️  ${operationName} gagal (attempt ${attempt}/${maxRetries}): ${error.message}`);
-        console.log(`🔄 Retry dalam ${RETRY_DELAY/1000} detik...`);
-        await sleep(RETRY_DELAY);
+        const waitTime = RETRY_DELAY * attempt; // Exponential backoff
+        console.log(`${operationName} gagal (attempt ${attempt}/${maxRetries}): ${error.message}`);
+        console.log(`🔄 Retry dalam ${waitTime/1000} detik...`);
+        await sleep(waitTime);
       } else if (!isNetworkError) {
         // Jika bukan network error, langsung throw
         throw error;
@@ -53,7 +64,7 @@ async function retryOperation(operation, operationName, maxRetries = MAX_RETRIES
   }
   
   // Jika semua retry gagal
-  console.log(`❌ ${operationName} gagal setelah ${maxRetries} percobaan`);
+  console.log(`${operationName} gagal setelah ${maxRetries} percobaan`);
   throw lastError;
 }
 
@@ -133,9 +144,21 @@ async function downloadImage(page, imgUrl, savePath) // Fungsi untuk download ga
   return await retryOperation(async () => {
     //Menjalankan kode di dalam browser, bukan di Node.js
     const buffer = await page.evaluate(async (url) => {
-      const res = await fetch(url, { credentials: "include" });
-      const arr = await res.arrayBuffer();
-      return Array.from(new Uint8Array(arr));
+      try {
+        const res = await fetch(url, { 
+          credentials: "include",
+          timeout: 30000 // 30 second timeout
+        });
+        
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+        }
+        
+        const arr = await res.arrayBuffer();
+        return Array.from(new Uint8Array(arr));
+      } catch (error) {
+        throw new Error(`Fetch failed: ${error.message}`);
+      }
     }, imgUrl);
 
     const data = Buffer.from(buffer);
@@ -148,25 +171,82 @@ async function downloadImage(page, imgUrl, savePath) // Fungsi untuk download ga
   }, `Download gambar ${path.basename(savePath)}`);
 }
 
-// Jalankan browser
-(async () => {
-  const browser = await puppeteer.launch({
-    headless: "new",
+// Fungsi helper untuk launch browser dengan konfigurasi optimal
+async function launchBrowser() {
+  console.log('🚀 Meluncurkan Google Chrome...');
+  
+  const launchOptions = {
+    headless: USE_HEADLESS, // Gunakan konfigurasi dari konstanta di atas
+    executablePath: CHROME_PATH, // Gunakan Chrome asli, bukan Chromium dari Puppeteer
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage"
-    ]
-  });
+      "--disable-dev-shm-usage",
+      "--disable-blink-features=AutomationControlled",
+      "--disable-features=IsolateOrigins,site-per-process",
+      "--window-size=1920,1080"
+    ],
+    protocolTimeout: 180000, // 3 menit
+    ignoreHTTPSErrors: true,
+    defaultViewport: {
+      width: 1920,
+      height: 1080
+    }
+  };
+  
+  try {
+    const browser = await puppeteer.launch(launchOptions);
+    console.log('✅ Google Chrome berhasil diluncurkan');
+    
+    // Test browser connection
+    const version = await browser.version();
+    console.log('📱 Chrome version:', version);
+    
+    return browser;
+  } catch (error) {
+    console.error('❌ Gagal meluncurkan Chrome:', error.message);
+    console.error('💡 Pastikan Google Chrome terinstall di:', CHROME_PATH);
+    throw error;
+  }
+}
 
-  // Buka tab baru
+// Fungsi helper untuk setup page dengan semua event listeners
+async function setupPage(browser) {
   const page = await browser.newPage();
   
   // Set timeout untuk halaman
   page.setDefaultTimeout(PAGE_TIMEOUT);
-  page.setDefaultNavigationTimeout(PAGE_TIMEOUT);
+  page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT);
+  
+  // Handle page errors - don't throw here, just log
+  page.on('error', error => {
+    console.error('❌ Page crashed:', error.message);
+  });
+  
+  page.on('pageerror', error => {
+    // Filter out common non-critical JavaScript errors
+    if (error.message.includes('Unexpected end of input') || 
+        error.message.includes('SyntaxError') ||
+        error.message.includes('Unexpected token')) {
+      console.warn('⚠️  Page script warning (non-critical):', error.message);
+    } else {
+      console.error('❌ Page script error:', error.message);
+    }
+  });
+  
+  // Handle request failures
+  page.on('requestfailed', request => {
+    console.warn('⚠️  Request failed:', request.url(), request.failure()?.errorText);
+  });
+  
+  // Handle console messages dari browser untuk debugging
+  page.on('console', msg => {
+    if (msg.type() === 'error') {
+      console.log('🌐 Browser console error:', msg.text());
+    }
+  });
 
- // Set User-Agent agar terlihat seperti Chrome asli
+  // Set User-Agent agar terlihat seperti Chrome asli
   await page.setUserAgent(
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
   );
@@ -175,15 +255,45 @@ async function downloadImage(page, imgUrl, savePath) // Fungsi untuk download ga
   await page.setExtraHTTPHeaders({
     "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8"
   });
+  
+  return page;
+}
 
-  // Load checkpoint dan metadata yang sudah ada
-  const checkpoint = loadCheckpoint();
-  const metadata = loadExistingMetadata(); // Load metadata yang sudah tersimpan
+// Jalankan browser
+(async () => {
+  let browser;
+  let page;
+  let metadata = []; // Deklarasi di sini agar bisa diakses di catch block
   
-  const startPage = checkpoint ? checkpoint.lastPage : 0;
-  const startCard = checkpoint ? checkpoint.lastCard + 1 : 0;
-  
-  console.log("🚀 Memulai scraping dari halaman", startPage + 1, "item", startCard + 1);
+  try {
+    browser = await launchBrowser();
+    page = await setupPage(browser);
+    
+    // Add global error handlers untuk page
+    page.on('error', (error) => {
+      console.error('❌ Page error:', error.message);
+      // Don't throw here to prevent unhandled rejections
+    });
+    
+    page.on('pageerror', (error) => {
+      // Filter out common non-critical errors
+      if (error.message.includes('Unexpected end of input') || 
+          error.message.includes('SyntaxError') ||
+          error.message.includes('Unexpected token')) {
+        console.warn('⚠️  Page script warning (non-critical):', error.message);
+      } else {
+        console.error('❌ Page script error:', error.message);
+      }
+    });
+    
+    // Load checkpoint dan metadata yang sudah ada
+    const checkpoint = loadCheckpoint();
+    metadata = loadExistingMetadata(); // Assign ke variable yang sudah dideklarasi
+    
+    const startPage = checkpoint ? checkpoint.lastPage : 0;
+    const startCard = checkpoint ? checkpoint.lastCard + 1 : 0;
+    
+    console.log("🚀 Memulai scraping dari halaman", startPage + 1, "item", startCard + 1);
 
   // Loop halaman list (pagination)
   for (let p = startPage; p < MAX_PAGES; p++) {
@@ -193,9 +303,14 @@ async function downloadImage(page, imgUrl, savePath) // Fungsi untuk download ga
 
     console.log("OPEN LIST:", listUrl);
     
-    // Retry untuk membuka halaman list
+    // Retry untuk membuka halaman list dengan strategi yang lebih robust
     await retryOperation(async () => {
-      await page.goto(listUrl, { waitUntil: "networkidle2" });
+      await page.goto(listUrl, { 
+        waitUntil: "domcontentloaded", // Gunakan domcontentloaded untuk lebih cepat dan stabil
+        timeout: NAVIGATION_TIMEOUT 
+      });
+      // Tunggu sebentar untuk memastikan konten dimuat
+      await sleep(2000);
     }, `Membuka halaman list ${p + 1}`);
     
     await sleep(1500 + Math.random() * 2000); //Delay acak agar tidak seperti bot (1,5 - 3,5 sec)
@@ -203,17 +318,21 @@ async function downloadImage(page, imgUrl, savePath) // Fungsi untuk download ga
   // Mengambil semua data berita dari halaman
     const cards = await retryOperation(async () => {
       return await page.evaluate(() => {
-        return Array.from(document.querySelectorAll(".row-cards .card")).map(card => {
-          //Ambil judul dan link detail
-          const titleEl = card.querySelector(".text-muted a"); 
-          const title = titleEl?.innerText.trim() || null;
-          const detailUrl = titleEl?.href || null;
+        try {
+          return Array.from(document.querySelectorAll(".row-cards .card")).map(card => {
+            //Ambil judul dan link detail
+            const titleEl = card.querySelector(".text-muted a"); 
+            const title = titleEl?.innerText.trim() || null;
+            const detailUrl = titleEl?.href || null;
 
-          const media = card.querySelector(".d-flex a.text-default")?.innerText || null; //Ambil nama media
-          const date = card.querySelector(".d-flex small")?.innerText || null; //Ambil tanggal berita
+            const media = card.querySelector(".d-flex a.text-default")?.innerText || null; //Ambil nama media
+            const date = card.querySelector(".d-flex small")?.innerText || null; //Ambil tanggal berita
 
-          return { title, detailUrl, media, date }; //Hasilnya setiap berita disimpan sebagai object
-        });
+            return { title, detailUrl, media, date }; //Hasilnya setiap berita disimpan sebagai object
+          });
+        } catch (error) {
+          throw new Error(`Error parsing cards: ${error.message}`);
+        }
       });
     }, `Mengambil data cards halaman ${p + 1}`);
 
@@ -232,9 +351,14 @@ async function downloadImage(page, imgUrl, savePath) // Fungsi untuk download ga
       console.log(` Page ${p + 1}, Card ${i + 1}`);
       console.log(`  OPEN DETAIL: ${item.detailUrl}`);
 
-  // Buka halaman detail berita dan mengambil semua gambarnya.
+  // Buka halaman detail berita dan mengambil semua gambarnya dengan strategi yang lebih robust
       await retryOperation(async () => {
-        await page.goto(item.detailUrl, { waitUntil: "networkidle2" });
+        await page.goto(item.detailUrl, { 
+          waitUntil: "domcontentloaded",
+          timeout: NAVIGATION_TIMEOUT 
+        });
+        // Tunggu sebentar untuk memastikan konten dimuat
+        await sleep(2000);
       }, `Membuka detail berita ${i + 1}`);
       
       await sleep(1200 + Math.random() * 1500);
@@ -242,12 +366,16 @@ async function downloadImage(page, imgUrl, savePath) // Fungsi untuk download ga
   //Ambil semua gambar di halaman detail
       const images = await retryOperation(async () => {
         return await page.evaluate(() => {
-          return Array.from(
-            document.querySelectorAll("a.aimage-zoom img")
-          ).map(img => ({
-            src: img.src,
-            filename: img.closest("a")?.dataset?.gambar_filename || null
-          }));
+          try {
+            return Array.from(
+              document.querySelectorAll("a.aimage-zoom img")
+            ).map(img => ({
+              src: img.src,
+              filename: img.closest("a")?.dataset?.gambar_filename || null
+            }));
+          } catch (error) {
+            throw new Error(`Error parsing images: ${error.message}`);
+          }
         });
       }, `Mengambil gambar dari berita ${i + 1}`);
 
@@ -304,7 +432,6 @@ async function downloadImage(page, imgUrl, savePath) // Fungsi untuk download ga
     }
   }
 
-//Setelah semua selesai → hapus checkpoint dan simpan metadata final
   console.log("✅ Scraping selesai!");
   if (fs.existsSync(CHECKPOINT_FILE)) {
     fs.unlinkSync(CHECKPOINT_FILE);
@@ -316,6 +443,103 @@ async function downloadImage(page, imgUrl, savePath) // Fungsi untuk download ga
     JSON.stringify(metadata, null, 2)
   );
 
-//Tutup browser
+  //Tutup browser
   await browser.close();
-})();
+  
+  } catch (error) {
+    console.error('\n❌ Error fatal terjadi:', error.message);
+    
+    if (error.stack) {
+      console.error('Stack trace:', error.stack);
+    }
+    
+    // Identifikasi jenis error
+    if (error.message.includes('socket hang up') || error.message.includes('ECONNRESET')) {
+      console.error('💡 Koneksi internet terputus atau server tidak merespons');
+      console.error('💡 Silakan coba lagi nanti atau periksa koneksi internet Anda');
+    } else if (error.message.includes('timeout')) {
+      console.error('💡 Operasi timeout - server terlalu lama merespons');
+    } else if (error.message.includes('Navigation')) {
+      console.error('💡 Gagal navigasi ke halaman - URL mungkin tidak valid');
+    }
+    
+    // Simpan metadata yang sudah berhasil dikumpulkan
+    if (metadata && metadata.length > 0) {
+      console.log('\n💾 Menyimpan metadata yang sudah dikumpulkan...');
+      try {
+        fs.writeFileSync(
+          path.join(OUT, "metadata.json"),
+          JSON.stringify(metadata, null, 2)
+        );
+        console.log(`✅ ${metadata.length} item berhasil disimpan`);
+      } catch (saveError) {
+        console.error('❌ Gagal menyimpan metadata:', saveError.message);
+      }
+    } else {
+      console.log('ℹ️  Tidak ada data yang berhasil dikumpulkan');
+    }
+    
+    // Tutup browser jika masih terbuka
+    if (browser) {
+      try {
+        await browser.close();
+        console.log('Browser ditutup');
+      } catch (closeError) {
+        console.error('⚠️  Error saat menutup browser:', closeError.message);
+      }
+    }
+    
+    process.exit(1);
+  }
+})().catch(error => {
+  console.error('\n❌ Unhandled Promise Rejection:', error.message || error);
+  if (error.stack) {
+    console.error('Stack:', error.stack);
+  }
+  
+  // Identifikasi jenis error
+  if (error.message && error.message.includes('socket hang up') || error.message && error.message.includes('ECONNRESET')) {
+    console.error('💡 Koneksi internet terputus atau server tidak merespons');
+    console.error('💡 Silakan coba lagi nanti atau periksa koneksi internet Anda');
+  } else if (error.message && error.message.includes('timeout')) {
+    console.error('💡 Operasi timeout - server terlalu lama merespons');
+  } else if (error.message && error.message.includes('Navigation')) {
+    console.error('💡 Gagal navigasi ke halaman - URL mungkin tidak valid');
+  }
+  
+  process.exit(1);
+});
+
+// Add global process handlers untuk menangkap unhandled rejections
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('\n❌ Unhandled Promise Rejection at:', promise);
+  console.error('Reason:', reason);
+  
+  // Jika reason adalah ErrorEvent, extract message-nya
+  if (reason && typeof reason === 'object') {
+    if (reason.message) {
+      console.error('Error message:', reason.message);
+    }
+    if (reason.type) {
+      console.error('Error type:', reason.type);
+    }
+    if (reason.target) {
+      console.error('Error target:', reason.target);
+    }
+    // Log semua properties dari ErrorEvent
+    try {
+      console.error('Full error object:', JSON.stringify(reason, Object.getOwnPropertyNames(reason)));
+    } catch (e) {
+      console.error('Could not stringify error object');
+    }
+  }
+  
+  // Jangan exit langsung, biarkan script melanjutkan
+  console.error('⚠️  Script akan melanjutkan meskipun ada unhandled rejection...');
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('\n❌ Uncaught Exception:', error.message);
+  console.error('Stack:', error.stack);
+  process.exit(1);
+});
