@@ -1,4 +1,4 @@
-from paddleocr import PaddleOCR
+import easyocr
 import json
 import os
 import time
@@ -7,7 +7,7 @@ import time
 MAX_RETRIES = 3
 RETRY_DELAY = 5  # detik
 
-ocr = PaddleOCR(use_angle_cls=True, lang="id")
+reader = easyocr.Reader(['id', 'en'], gpu=False)
 
 CHECKPOINT_FILE = "../scraper/output/ocr_checkpoint.json"
 OUTPUT_FILE = "../scraper/output/metadata_ocr.json"
@@ -113,14 +113,15 @@ for i in range(start_index, total_items):
     try:
         # Gunakan retry untuk operasi OCR
         def do_ocr():
-            result = ocr.ocr(img_path, cls=True)
+            result = reader.readtext(img_path)
             texts = []
 
-            if result and result[0]:
-                for line in result[0]:
+            if result:
+                for detection in result:
+                    # EasyOCR format: (bbox, text, confidence)
                     texts.append({
-                        "text": line[1][0],
-                        "confidence": float(line[1][1])
+                        "text": detection[1],
+                        "confidence": float(detection[2])
                     })
             return texts
         
@@ -149,4 +150,3 @@ if os.path.exists(CHECKPOINT_FILE):
     print("🗑️  Checkpoint OCR dihapus (proses selesai)")
 
 print(f"✅ OCR selesai! Total {total_items} item berhasil diproses")
-
