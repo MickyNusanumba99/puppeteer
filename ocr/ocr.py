@@ -5,6 +5,9 @@ import time
 import cv2
 import numpy as np
 from collections import defaultdict
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
+
 
 MAX_RETRIES = 3
 RETRY_DELAY = 5
@@ -30,6 +33,7 @@ def get_bbox_info(detection):
     y_top = min(p[1] for p in bbox)
     y_bottom = max(p[1] for p in bbox)
     x_center = (x_left + x_right) / 2
+    width = x_right - x_left
     height = y_bottom - y_top
     return {
         "bbox": bbox,
@@ -39,53 +43,45 @@ def get_bbox_info(detection):
         "y_top": y_top,
         "y_bottom": y_bottom,
         "height": height,
+        "width": width,
         "text": detection[1],
         "confidence": float(detection[2])
     }
 
+def detect_columns_kmeans(detections, max_columns=4):
+    infos = [get_bbox_info(d) for d in detections if d[2] > 0.4]
+    
+    if len(infos) < 5:
+        return [sorted(infos, key=lambda i: i["y_top"])]
 
-def detect_columns(detections):
-    """Deteksi kolom berdasarkan posisi X dari bounding box.
-    Menggunakan clustering sederhana pada x_center.
-    """
-    if not detections:
-        return []
+    X = np.array([[info["x_center"]] for info in infos])
 
-    infos = [get_bbox_info(d) for d in detections]
+    best_score = -1
+    best_k = 1
 
-    all_x_left = [info["x_left"] for info in infos]
-    all_x_right = [info["x_right"] for info in infos]
-    img_width = max(all_x_right) - min(all_x_left) if all_x_right else 1
+    for k in range(2, min(max_columns, len(infos)) + 1):
+        kmeans = KMeans(n_clusters=k, random_state=42).fit(X)
+        score = silhouette_score(X, kmeans.labels_)
+        if score > best_score:
+            best_score = score
+            best_k = k
 
-    col_threshold = img_width * 0.20
+    kmeans = KMeans(n_clusters=best_k, random_state=42).fit(X)
+    labels = kmeans.labels_
 
-    sorted_by_x = sorted(infos, key=lambda i: i["x_center"])
+    columns = [[] for _ in range(best_k)]
 
-    columns = []
-    current_col = [sorted_by_x[0]]
-
-    for info in sorted_by_x[1:]:
-        col_avg_x = sum(i["x_center"] for i in current_col) / len(current_col)
-        if abs(info["x_center"] - col_avg_x) <= col_threshold:
-            current_col.append(info)
-        else:
-            columns.append(current_col)
-            current_col = [info]
-
-    columns.append(current_col)
+    for info, label in zip(infos, labels):
+        columns[label].append(info)
 
     for col in columns:
         col.sort(key=lambda i: i["y_top"])
 
-    columns.sort(key=lambda col: sum(i["x_center"] for i in col) / len(col))
+    columns.sort(key=lambda col: np.mean([i["x_center"] for i in col]))
 
     return columns
 
-
 def detect_paragraphs(column_lines):
-    """Deteksi paragraf dalam satu kolom berdasarkan jarak vertikal (Y gap).
-    Jika gap antar baris > 1.5x rata-rata tinggi baris → paragraf baru.
-    """
     if not column_lines:
         return []
 
@@ -104,7 +100,7 @@ def detect_paragraphs(column_lines):
         gap = curr["y_top"] - prev["y_bottom"]
 
         # Jika gap besar → paragraf baru
-        if gap > avg_height * 1.5:
+        if gap > avg_height * 2.0:
             paragraphs.append(" ".join(current_paragraph))
             current_paragraph = [curr["text"]]
         else:
@@ -123,7 +119,7 @@ def process_ocr_result(detections):
         return "", [], []
 
     # Deteksi kolom
-    columns = detect_columns(detections)
+    columns = detect_columns_kmeans(detections)
 
     # Proses tiap kolom → deteksi paragraf
     all_paragraphs = []
@@ -203,11 +199,7 @@ def save_bounding_box_image(img_path, columns):
 
     return bbox_path
 
-
-# ============================================================
 # RETRY, CHECKPOINT, & MAIN LOGIC
-# ============================================================
-
 def retry_operation(operation, operation_name, max_retries=MAX_RETRIES):
     """Retry wrapper untuk operasi yang bisa gagal."""
     last_error = None
@@ -237,7 +229,6 @@ def retry_operation(operation, operation_name, max_retries=MAX_RETRIES):
     print(f"❌ {operation_name} gagal setelah {max_retries} percobaan")
     raise last_error
 
-
 def load_checkpoint():
     if os.path.exists(CHECKPOINT_FILE):
         try:
@@ -262,7 +253,6 @@ def save_checkpoint(index, total):
 
 
 def save_text_file(img_path, full_text, title="", date="", media=""):
-    """Simpan teks hasil OCR ke file .txt"""
     os.makedirs(TEXTS_DIR, exist_ok=True)
 
     # Nama file dari nama gambar
@@ -286,10 +276,6 @@ def save_text_file(img_path, full_text, title="", date="", media=""):
 
     return txt_path
 
-
-# ============================================================
-# MAIN
-# ============================================================
 
 # Load data dan checkpoint
 with open(INPUT_FILE, encoding="utf-8") as f:
