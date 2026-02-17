@@ -2,17 +2,17 @@ import easyocr
 import json
 import os
 import time
+import warnings
 import cv2
 import numpy as np
+warnings.filterwarnings("ignore", message=".*pin_memory.*")
 from collections import defaultdict
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 
-
 MAX_RETRIES = 3
 RETRY_DELAY = 5
 
-# Inisialisasi EasyOCR Reader (support Bahasa Indonesia dan Inggris)
 reader = easyocr.Reader(['id', 'en'], gpu=False)
 
 CHECKPOINT_FILE = "../output/ocr_checkpoint.json"
@@ -23,10 +23,8 @@ BBOX_DIR = "../output/bounding-box"
 
 # Column Detection & Paragraph Detection
 def get_bbox_info(detection):
-    """Ambil info posisi dari bounding box EasyOCR.
-    EasyOCR bbox format: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-    (top-left, top-right, bottom-right, bottom-left)
-    """
+    # EasyOCR bbox format: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+    # (top-left, top-right, bottom-right, bottom-left)
     bbox = detection[0]
     x_left = min(p[0] for p in bbox)
     x_right = max(p[0] for p in bbox)
