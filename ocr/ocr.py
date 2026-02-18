@@ -13,7 +13,7 @@ from sklearn.metrics import silhouette_score
 MAX_RETRIES = 3
 RETRY_DELAY = 5
 
-reader = easyocr.Reader(['id', 'en'], gpu=False)
+reader = easyocr.Reader(['id', 'en'], gpu=True)
 
 CHECKPOINT_FILE = "../output/ocr_checkpoint.json"
 OUTPUT_FILE = "../output/metadata_ocr.json"

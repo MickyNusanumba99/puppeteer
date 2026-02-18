@@ -8,7 +8,7 @@ puppeteer.use(StealthPlugin()); // Aktifkan plugin stealth
 
 // Konfigurasi Browser
 const USE_HEADLESS = true; // true = browser tidak terlihat (production), false = browser terlihat (debugging)
-const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'; // Path Chrome di macOS
+const CHROME_PATH = 'C:/Program Files/Google/Chrome/Application/chrome.exe'; // Path Chrome di macOS
 
 // URL utama website target dan batas tanggal pencarian
 const BASE_URL = "https://kliping.jogjakota.go.id/frontend"; 
