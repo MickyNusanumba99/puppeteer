@@ -15,11 +15,11 @@ RETRY_DELAY = 5
 
 reader = easyocr.Reader(['id', 'en'], gpu=True)
 
-CHECKPOINT_FILE = "../output/ocr_checkpoint.json"
-OUTPUT_FILE = "../output/metadata_ocr.json"
-INPUT_FILE = "../output/metadata.json"
-TEXTS_DIR = "../output/texts"
-BBOX_DIR = "../output/bounding-box"
+INPUT_FILE = "../scraper/output/metadata.json"
+TEXTS_DIR = "../scraper/output/texts"
+BBOX_DIR = "../scraper/output/bounding-box"
+CHECKPOINT_FILE = "../scraper/output/ocr_checkpoint.json"
+OUTPUT_FILE = "../scraper/output/metadata_ocr.json"
 
 # Column Detection & Paragraph Detection
 def get_bbox_info(detection):
